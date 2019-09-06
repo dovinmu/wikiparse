@@ -10,9 +10,6 @@ import subprocess
 import time
 import xml.etree.ElementTree as etree
 
-import logging
-import os
-
 logger = logging.getLogger('wikidump.config')
 
 scratch = 'E:/enwiki-20190101-pages-articles-multistream.xml/scratch'
@@ -70,6 +67,20 @@ all_prefixes =  [    dumpfile_name.match(f).group(1)
                 if   dumpfile_name.match(f)
                 ]
 
+def _get_starting_indices(string, tag):
+    return [m.start() for m in re.finditer(tag, string)]
+
+def get_tags(string, tag):
+    tags = []
+    if tag[-1] != '\|':
+        tag = tag+'\|'
+    starting_indices = _get_starting_indices(string, tag)
+    for idx in starting_indices:
+        ending_idx = string[idx:].find('}}')
+        tags.append(string[idx:idx+ending_idx])
+    return tags
+
+
 def getSizeAndMakeOffsets(f, db, current_page=0):
     print('=== making offsets ===')
 
@@ -105,8 +116,8 @@ def getSizeAndMakeOffsets(f, db, current_page=0):
             db.commit()
             total_time += time.time() - ts
             print(f' {round(idx / 1000000000, 3):10} GB processed \
-                     {round(1000 * (time.time() - ts) / 10, 2):10}ms per mb \
-                     {round(1000 * total_time/mbytes_processed, 2):10}ms per mb avg',
+                     {round(1000 * (time.time() - ts) / 10, 2):10}ms / mb \
+                     {round(1000 * total_time/mbytes_processed, 2):10}ms / mb avg',
                      end='\r')
             ts = time.time()
     print('\npages:', current_page, round(total_time, 1), 'seconds')
@@ -186,7 +197,7 @@ class Dump:
                 current_page=start_at_page)
             size = self.metadata['size']
             self.logger.info("Processed %d pages", size)
-            print(f'Processed {size/1000}k pages')
+            print(f'Processed {round(size/1000)}k pages')
 
         self.logger.debug("Size: %d pages", size)
 
@@ -198,31 +209,30 @@ class Dump:
         #self.logger.debug("Currently know of %d page titles", len(self.page_titles))
         # find the rest of the pages
         if build_index and num_page_titles < size:
-            print('=== making page title dictionary from beginning ===')
             total_time = 0
+            start_ts = time.time()
+            print("inserting titles into index dictionary")
             for i in range(num_page_titles, size):
-                ts = time.time()
-
                 try:
                     tree = etree.fromstring(self.get_raw(i))
                 except Exception as e:
-                    print(f'{i} caused an error:' + self.get_raw(i)[:50], '...', self.get_raw(i)[-50:])
-                    continue
+                    try:
+                        print(f'{i} caused an error:' + self.get_raw(i)[:50], '...', self.get_raw(i)[-50:])
+                        continue
+                    except:
+                        # print(f'{i} cannot get raw')
+                        continue
                 # Need to encode as etree will return both str and unicode
 #                 title = tree.find('title').text.encode('utf8')
                 title = tree.find('title').text
-                # if title in self.page_titles:
-                #     self.logger.warning("Already had '%s', index %d", title, self.page_titles[title])
-                # else:
-                    # self.page_titles[title] = i
                 self.cursor.execute(
                     f'UPDATE indices SET title=? WHERE page_num=?',
                     (title, i+1)
                 )
-                total_time += time.time()-ts
                 if i % 1000 == 0:
+                    total_time = time.time()-start_ts
                     self.db.commit()
-                    print(f' {round((100*i/size), 3):10}%\t{round(1000*total_time/(i+1), 2)}ms per page', end='\r')
+                    print(f' {round((100*i/size), 3):10}%\t{round(1000*total_time/(i+1), 2)}ms / page', end='\r')
         else:
             self.logger.debug("Not building page title index")
 
@@ -230,6 +240,217 @@ class Dump:
         # self.db.close()
         self.db.commit()
         print("\n__init__ complete")
+
+    def create_title_db(self):
+        size = self.metadata['size']
+        try:
+            self.cursor.execute('DROP TABLE titles')
+        except sqlite3.OperationalError:
+            pass
+        self.cursor.execute('CREATE TABLE titles\
+                            (title TEXT PRIMARY KEY, idx INTEGER, page_num INTEGER)')
+        print(f'=== making page title dictionary for {size} pages ===')
+        total_time = 0
+        start_ts = time.time()
+        for i in range(0, size):
+            try:
+                tree = etree.fromstring(self.get_raw(i))
+            except Exception as e:
+                try:
+                    print(f'{i} caused an error:' + self.get_raw(i)[:50], '...', self.get_raw(i)[-50:])
+                    continue
+                except:
+                    # print(f'{i} cannot get raw')
+                    continue
+            # Need to encode as etree will return both str and unicode
+#                 title = tree.find('title').text.encode('utf8')
+            title = tree.find('title').text
+            idx = self.cursor.execute(f'SELECT idx FROM indices WHERE page_num={i+1}').fetchone()[0]
+            try:
+                self.cursor.execute(
+                    f"INSERT INTO titles VALUES (?,?,?)",
+                    (title, i+1, idx)
+                )
+            except sqlite3.OperationalError as e:
+                print(e, title)
+                return
+            if i % 1000 == 0:
+                total_time = time.time()-start_ts
+                self.db.commit()
+                print(f' {round((100*i/size), 3):10}%\t{round(1000*total_time/(i+1), 2)}ms / page', end='\r')
+
+    def extract_lat_lon(self, coord_string):
+        split = coord_string.split('|')
+        coord_list = []
+        for s in split:
+            if ':' in s or '=' in s:
+                break
+            if 'Coord' not in s and 'LAT' not in s and 'LONG' not in s:
+                coord_list.append(s)
+        return coord_list
+
+    def get_keywords(self, coord_string, verbose=False):
+        if verbose:
+            print(coord_string)
+        keywords = {}
+        rest = []
+        items = coord_string.split('|')
+        for item in items:
+            if '=' in item:
+                keywords[item.split('=')[0]] = item.split('=')[1]
+            elif ':' in item:
+                keywords[item.split(':')[0]] = item.split(':')[1]
+            else:
+                rest.append(item)
+        return keywords
+
+    def convert_to_decimal(self, coord_list):
+        coord_list = [s.strip().lower() for s in coord_list if s.strip() != '']
+        if len(coord_list) < 2:
+            return [0, 0]
+        if len(coord_list) == 2:
+            return [float(coord_list[0]), float(coord_list[1])]
+        directions = 0
+        for s in coord_list:
+            s = s.strip().lower()
+            if s and s.strip() in 'nesw':
+                directions += 1
+        if directions != 2:
+            raise Exception(directions, "wrong number of directions for:", coord_list)
+
+        lat = []
+        lon = []
+        creating_lat = True
+        for s in coord_list:
+            s = s.strip().lower()
+            if s == '':
+                continue
+            if creating_lat:
+                if s in 'ns':
+                    creating_lat = False
+                    while len(lat) < 3:
+                        lat.append(0)
+                    if s == 'n':
+                        lat.append(1)
+                    else:
+                        lat.append(-1)
+                else:
+                    if ',' in s:
+                        s = s.replace(',', '.')
+                    lat.append(float(s))
+            else:
+                if s in 'ew':
+                    while len(lon) < 3:
+                        lon.append(0)
+                    if s == 'e':
+                        lon.append(1)
+                    else:
+                        lon.append(-1)
+                else:
+                    if ',' in s:
+                        s = s.replace(',', '.')
+                    lon.append(float(s))
+        return [
+            (lat[0] + lat[1]/60 + lat[2]/3600) * lat[3],
+            (lon[0] + lon[1]/60 + lon[2]/3600) * lon[3]
+        ]
+
+    def extract_coord_strings(self, start=0):
+        print("extracting Coord template from pages")
+        ts = time.time()
+        print(start, '-', int(self.metadata['size']))
+        for i in range(start, int(self.metadata['size'])):
+            try:
+                page = self.get_page_by_index(i)
+            except:
+                break
+            if page.text is None:
+                continue
+            tags = sp.get_tags(page.text, 'Coord')
+            title = page.title
+            if tags:
+                tagstring = '||'.join(tags)
+                self.cursor.execute(
+                    f'UPDATE indices SET coords=? WHERE page_num=?',
+                    (tagstring, i+1)
+                )
+            if i % 100 == 0:
+                self.db.commit()
+            if i % 1000 == 0:
+                print(round(100*i/(self.metadata['size']), 2), '%', f'({i})', end='\r')
+        total_time = time.time() - ts
+        print('total time:', round(total_time / 60 / 60, 2), 'hours')
+
+    def create_coords_db(self):
+        print("processing Coord templates")
+        result = self.cursor.execute(
+            '''SELECT page_num,coords,title FROM indices WHERE coords != ""
+            ''').fetchall()
+        coord_strings = {item[0]:item[1] for item in result}
+        idx_to_title = {item[0]:item[2] for item in result}
+        for page_num in coord_strings:
+            if '||' in coord_strings[page_num]:
+                page_coord_strings = coord_strings[page_num].split('||')
+                coord_strings[page_num] = page_coord_strings[0]
+                for s in page_coord_strings:
+                    if "display=title" in s:
+                        coord_strings[page_num] = s
+
+        keywords = defaultdict(int)
+        for coord_string in coord_strings.values():
+            for kw in self.get_keywords(coord_string).keys():
+                keywords[kw.strip()] += 1
+        try:
+            self.cursor.execute('''DROP TABLE coords''')
+        except sqlite3.OperationalError:
+            pass
+        self.cursor.execute('''CREATE TABLE coords
+            (coords TEXT, lat REAL DEFAULT 0, lon REAL DEFAULT 0,
+            page_num INTEGER PRIMARY KEY, accessdate TEXT DEFAULT '',
+            date TEXT DEFAULT '', dim TEXT DEFAULT '',
+            display TEXT DEFAULT '', elevation TEXT DEFAULT '',
+            format TEXT DEFAULT '', globe TEXT DEFAULT '',
+            id TEXT DEFAULT '', name TEXT DEFAULT '',
+            nosave TEXT DEFAULT '', notes TEXT DEFAULT '',
+            publisher TEXT DEFAULT '', reason TEXT DEFAULT '',
+            region TEXT DEFAULT '', scale TEXT DEFAULT '',
+            source TEXT DEFAULT '', title TEXT DEFAULT '',
+            type TEXT DEFAULT '', upright TEXT DEFAULT '',
+            url TEXT DEFAULT '', work TEXT DEFAULT '')
+        ''')
+        entries_list = [ 'accessdate', 'date', 'dim', 'display',
+            'elevation', 'format', 'globe','id',
+            'name', 'nosave', 'notes', 'publisher',
+            'reason', 'region', 'scale', 'source',
+            'title', 'type', 'upright', 'url', 'work']
+        def insert_keyword_dict(page_num, coords, kws, debug=False):
+            allowed_keys = [kw for kw in kws.keys() if kw in entries_list]
+            allowed_vals = [kws[kw] for kw in allowed_keys]
+
+            try:
+                lat,lon = self.convert_to_decimal(self.extract_lat_lon(coords))
+            except:
+                lat = lon = 0
+            keys = ['coords', 'lat', 'lon', 'page_num'] + allowed_keys
+            vals = [coords, lat, lon, page_num] + allowed_vals
+
+            qstring = f'INSERT INTO coords (\
+                {",".join(keys)}) VALUES (\
+                {",".join(["?" for item in vals])})'
+
+            if debug:
+                print(qstring, vals)
+            self.cursor.execute(qstring, vals)
+
+        count = 0
+        for page_idx,coord_string in coord_strings.items():
+            keywords = self.get_keywords(coord_string)
+            keywords['title'] = idx_to_title[page_idx]
+            insert_keyword_dict(page_idx, coord_string, keywords)
+            if count > 100:
+                self.db.commit()
+                print(round(100*count/len(coord_strings), 2), '%', end='\r')
+            count += 1
 
     @property
     def size(self):
@@ -261,7 +482,11 @@ class Dump:
 
     def get_page_index(self, title):
         "Look up the index of a page based on its title"
-        return self.page_titles[title]
+        # return self.page_titles[title]
+        result = self.cursor.execute(f"SELECT idx FROM indices WHERE title == '{title}'").fetchone()
+        if result:
+            return result[0]
+        return -1
 
     def get_page_contents(self, index):
         "Get the full text of a page by index"
@@ -359,3 +584,7 @@ def load_dumps(langs=None, dump_path=None, build_index=False, scratch_folder='py
 
 if __name__ == "__main__":
     dump = load_dumps(build_index=True)
+    english = dump['en']
+    english.create_title_db()
+    # english.extract_coord_strings(19_090_000)
+    # english.create_coords_db()
