@@ -12,10 +12,7 @@ import xml.etree.ElementTree as etree
 
 logger = logging.getLogger('wikidump.config')
 
-scratch = 'E:/enwiki-20190101-pages-articles-multistream.xml/scratch'
-xml_dumps = 'E:/enwiki-20190101-pages-articles-multistream.xml/_actual'
-
-fname = 'enwiki-20190101-pages-articles-multistream.xml'
+xml_dumps = 'C:/Users/rowan/Documents/geowiki'
 
 # -*- coding: utf-8 -*-
 # Static constants for dealing with different langauge wikis
@@ -47,25 +44,11 @@ category_identifier =\
 # Match the name of a dumpfile
 dumpfile_name = re.compile(r'(?P<prefix>.*?)wiki-(?P<date>\d{8})-pages-articles-multistream.xml')
 
-intrawiki_link = re.compile(r"\[\[(?P<target>.*?\|)?(?P<anchor>.*?)\]\]")
-
 lang_prefixes = '|'.join(prefixes)
 lang_link = re.compile(r"\[\[(?P<prefix>"+lang_prefixes+"):(?P<title>.+?)\]\]")
 
 category_keywords = '|'.join(category_identifier.values())
 category_link = re.compile(r"\[\[(?P<title>("+category_keywords+"):(?P<category>.+?))\|(.+?)\]\]")
-category_name = re.compile(r"(?P<keyword>("+category_keywords+")):(?P<category>.+)")
-
-redirect = re.compile(r"\#REDIRECT (?P<target>.*)")
-
-template = re.compile(r"\{\{(?P<target>.*?)\}\}")
-
-xml_path = xml_dumps
-all_prefixes =  [    dumpfile_name.match(f).group(1)
-                for  f
-                in   os.listdir(xml_path)
-                if   dumpfile_name.match(f)
-                ]
 
 def _get_starting_indices(string, tag):
     return [m.start() for m in re.finditer(tag, string)]
@@ -81,7 +64,7 @@ def get_tags(string, tag):
     return tags
 
 
-def getSizeAndMakeOffsets(f, db, current_page=0):
+def getSizeAndMakeOffsets(f, db, current_page=0, sample=1.0):
     print('=== making offsets ===')
 
     # these exist to track progress
@@ -141,13 +124,11 @@ class Dump:
         path = os.path.join(self.cache_path, name)
         return shelve.open(path)
 
-    def __init__(self, xml_path, build_index=False, scratch_folder='py3'):
+    def __init__(self, xml_path, build_index=False, scratch_folder='./py3', sample=1.0):
         self.xml_path = os.path.abspath(xml_path)
         self.xml_file = open(self.xml_path, 'rb')
         # May want to hash the file instead for portability
-        # path_hash = hashlib.sha1(os.path.basename(self.xml_path)).hexdigest()
-        path_hash = scratch_folder
-        self.cache_path = os.path.join(scratch, path_hash)
+        self.cache_path = scratch_folder
 
         self.logger.info("============================================")
         self.logger.info("Loading data for %s", self.xml_path)
@@ -194,7 +175,8 @@ class Dump:
             self.metadata['size'] = getSizeAndMakeOffsets(
                 open(self.xml_path, 'rb'),
                 self.db,
-                current_page=start_at_page)
+                current_page=start_at_page,
+                sample=sample)
             size = self.metadata['size']
             self.logger.info("Processed %d pages", size)
             print(f'Processed {round(size/1000)}k pages')
@@ -202,17 +184,16 @@ class Dump:
         self.logger.debug("Size: %d pages", size)
 
         # Mapping from page title to page index
-        # self.page_titles = self._open_shelf('page_titles')
         num_page_titles = self.cursor.execute(
             '''SELECT Count(*) FROM indices WHERE title != ""'''
         ).fetchone()[0]
         #self.logger.debug("Currently know of %d page titles", len(self.page_titles))
         # find the rest of the pages
-        if build_index and num_page_titles < size:
+        if build_index and num_page_titles < size*sample:
             total_time = 0
             start_ts = time.time()
             print("inserting titles into index dictionary")
-            for i in range(num_page_titles, size):
+            for i in range(num_page_titles, int(size*sample)):
                 try:
                     tree = etree.fromstring(self.get_raw(i))
                 except Exception as e:
@@ -269,13 +250,13 @@ class Dump:
             try:
                 self.cursor.execute(
                     f"INSERT INTO titles VALUES (?,?,?)",
-                    (title, i+1, idx)
+                    (title, idx, i+1)
                 )
             except sqlite3.OperationalError as e:
                 print(e, title)
                 return
             if i % 1000 == 0:
-                total_time = time.time()-start_ts
+                total_time = time.time() - start_ts
                 self.db.commit()
                 print(f' {round((100*i/size), 3):10}%\t{round(1000*total_time/(i+1), 2)}ms / page', end='\r')
 
@@ -457,14 +438,14 @@ class Dump:
         return self.metadata['size']
 
     def get_raw(self, page_num):
-        "Get raw xml dump data for a given index"
+        "Get raw xml dump data for a given page number"
         f = self.xml_file
         # start_offset = self.page_offsets[str(index+1)]
-        start_offset = self.get_offset(page_num+1)
+        start_offset = self.get_offset(page_num)
         f.seek(start_offset)
         try:
             # end_offset = self.page_offsets[str(index+2)]
-            end_offset = self.get_offset(page_num+2)
+            end_offset = self.get_offset(page_num+1)
             return f.read(end_offset - start_offset).decode('utf-8')
         except KeyError:
             # Handle the corner case which is the very last entry
@@ -483,15 +464,14 @@ class Dump:
     def get_page_index(self, title):
         "Look up the index of a page based on its title"
         # return self.page_titles[title]
-        result = self.cursor.execute(f"SELECT idx FROM indices WHERE title == '{title}'").fetchone()
+        result = self.cursor.execute(f"SELECT idx FROM titles WHERE title == '{title}'").fetchone()
         if result:
             return result[0]
         return -1
 
-    def get_page_contents(self, index):
-        "Get the full text of a page by index"
-        tree = etree.fromstring(self.get_raw(index))
-        return tree.find('revision').find('text').text.encode('utf8')
+    def get_page_by_num(self, page_num):
+        "Get the full text of a page by page_num"
+        return Page(self.get_raw(page_num))
 
     def get_page_length(self, index):
         "Look up the length of a page given an index"
@@ -510,10 +490,6 @@ class Dump:
     def get_page(self, title):
         "Return a Page object for the page of the given title"
         index = self.get_page_index(title)
-        return Page(self.get_raw(index))
-
-    def get_page_by_index(self, index):
-        "Return a Page object given the raw index of the page"
         return Page(self.get_raw(index))
 
     def get_dumpfile_prefix(self):
@@ -564,23 +540,9 @@ def category_map(dump):
             cat_count[c].append(i)
     return cat_count
 
-def load_dumps(langs=None, dump_path=None, build_index=False, scratch_folder='py3'):
-    """Load the dumps, and take note of their size"""
-    # Take note that we will end up loading all the dumps we have for a given language
-    # but only returning the last one we find.
-    # TODO: Handle different-dated dumps of the same language
-    if langs is None:
-        langs = all_prefixes
-    if dump_path is None:
-        dump_path = xml_path
-    dumps = {}
-    for path in os.listdir(dump_path):
-        if not re.match('|'.join(langs), path): continue
-        full_path = os.path.join(dump_path, path)
-        d = Dump(full_path, build_index=build_index, scratch_folder=scratch_folder)
-        prefix = d.get_dumpfile_prefix()
-        dumps[prefix] = d
-    return dumps
+def load_dumps(dump_path, langs=None, build_index=False, scratch_folder='py3', sample=1.0):
+    d = Dump(dump_path, build_index=build_index, scratch_folder=scratch_folder, sample=sample)
+    return d
 
 if __name__ == "__main__":
     dump = load_dumps(build_index=True)
