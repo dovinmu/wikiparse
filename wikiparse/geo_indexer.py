@@ -89,13 +89,16 @@ class Indexer:
             raise Exception("cannot get idx for page", page_num)
         return result
 
-    def load(self, sample=.0001):
+    def get_page_numbers(self):
+        page_nums = self.cursor.execute('''SELECT page_num FROM coords WHERE display="inline,title"''').fetchall()
+        return [int(page_num[0]) for page_num in page_nums]
+
+    def load(self, sample=1.):
         start = time.time()
         pg = page_generator(open(self.xml_path, 'rb'), sample=sample)
         coords_count = 0
         for i,page in enumerate(pg):
             start_idx, end_idx, page = page
-            # print(i, start_idx, end_idx, f'"{page[:24]}...{page[-8:]}"')
             if utils.tag_finder(page, ['Coord', 'coord']):
                 coords_count += 1
                 page_text = page.decode('utf-8')
@@ -129,6 +132,47 @@ class Indexer:
         print(round(100*coords_count/i,2), '% contained coordinates tag')
         self.metadata['size'] = coords_count
         self.db.commit()
+        self.create_title_db()
+
+    def create_title_db(self):
+        print("Creating title dictionary")
+        try:
+            self.cursor.execute('DROP TABLE titles')
+        except sqlite3.OperationalError:
+            pass
+        self.cursor.execute('CREATE TABLE titles\
+                            (title TEXT PRIMARY KEY, start_idx INTEGER, end_idx INTEGER, page_num INTEGER)')
+        total_time = 0
+        start_ts = time.time()
+        page_numbers = self.get_page_numbers()
+        for i,page_num in enumerate(page_numbers):
+            try:
+                tree = etree.fromstring(self.get_raw(page_num))
+            except Exception as e:
+                try:
+                    print(f'{page_num} caused an error:', str(e))
+                    continue
+                except:
+                    # print(f'{i} cannot get raw')
+                    continue
+            # Need to encode as etree will return both str and unicode
+#                 title = tree.find('title').text.encode('utf8')
+            title = tree.find('title').text
+            start_idx,end_idx = self.cursor.execute(f'SELECT start_idx,end_idx FROM indices WHERE page_num={page_num}').fetchone()
+            try:
+                self.cursor.execute(
+                    f"INSERT INTO titles VALUES (?,?,?,?)",
+                    (title, start_idx, end_idx, page_num)
+                )
+            except sqlite3.OperationalError as e:
+                print(e, title)
+                return
+            except sqlite3.IntegrityError as e:
+                print(e, title)
+            if i % 1000 == 0:
+                total_time = time.time() - start_ts
+                self.db.commit()
+                print(f' {round((100*i/len(page_numbers)), 3):10}%\t{round(1000*total_time/(i+1), 2)}ms / page  ', end='\r')
 
 class Page:
     def __init__(self, string):
