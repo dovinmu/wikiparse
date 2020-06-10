@@ -6,6 +6,7 @@ import time
 import xml.etree.ElementTree as etree
 
 from . import pipeline_utils as utils
+from .tokenize import remove_metadata
 
 PAGES_ESTIMATE = 21_000_000
 
@@ -29,7 +30,7 @@ def page_generator(f, current_page=0, sample=1.0):
 class Indexer:
     logger = logging.getLogger('wikidump.model.Dump')
 
-    def __init__(self, xml_path, scratch_folder='./py3'):
+    def __init__(self, xml_path=None, scratch_folder='./py3'):
         self.xml_path = os.path.abspath(xml_path)
         self.xml_file = open(self.xml_path, 'rb')
         # May want to hash the file instead for portability
@@ -147,17 +148,9 @@ class Indexer:
         page_numbers = self.get_page_numbers()
         for i,page_num in enumerate(page_numbers):
             try:
-                tree = etree.fromstring(self.get_raw(page_num))
+                title = Page(self.get_raw(page_num)).title
             except Exception as e:
-                try:
-                    print(f'{page_num} caused an error:', str(e))
-                    continue
-                except:
-                    # print(f'{i} cannot get raw')
-                    continue
-            # Need to encode as etree will return both str and unicode
-#                 title = tree.find('title').text.encode('utf8')
-            title = tree.find('title').text
+                print(f'{page_num} caused an error:', str(e))
             start_idx,end_idx = self.cursor.execute(f'SELECT start_idx,end_idx FROM indices WHERE page_num={page_num}').fetchone()
             try:
                 self.cursor.execute(
@@ -173,14 +166,19 @@ class Indexer:
                 total_time = time.time() - start_ts
                 self.db.commit()
                 print(f' {round((100*i/len(page_numbers)), 3):10}%\t{round(1000*total_time/(i+1), 2)}ms / page  ', end='\r')
+        self.db.commit()
 
 class Page:
     def __init__(self, string):
         self.xml = string
         self.dom = etree.fromstring(string)
-        self.text = self.dom.find('revision').find('text').text
+        self._full_text = self.dom.find('revision').find('text').text
+        self.text = remove_metadata(self._full_text)
         self.title = self.dom.find('title').text
 
+    def coords(self):
+        return utils.page_to_geographic_db(self.xml)['coords']
+        
     def __str__(self):
         return 'Page: ' + self.title
 def run_test():

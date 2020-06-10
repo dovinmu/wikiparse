@@ -84,12 +84,44 @@ def lookup(word, wikipedia, threshold=10):
 
     return -1
 
+def remove_metadata(text):
+    stack = []
+    result = ''
+    metachars = set('{}[]()\'<>|')
+    html_on = False
+    
+    for i in range(len(text)):
+        if not stack and not html_on:
+            if text[i] not in metachars:
+                result += text[i]
+            elif text[i] == '|':
+                result += ' '
+        if text[i:i+2] == '{{':
+            stack.append(i)
+        elif text[i:i+2] == '}}':
+            try:
+                stack.pop()
+            except:
+                pass
+        elif text[i] == '<':
+            stack.append(i)
+            if text[i:i+2] == '</':
+                html_on = False
+            else:
+                html_on = True
+        elif text[i] == '>':
+            if i > 0 and text[i-1:i+1] == '/>':
+                html_on = False
+            try:
+                stack.pop()
+            except:
+                pass
+    result = result.split('==See also==')[0]
+    return result.replace('=', ' ')
+
 def tokenize_page(page):
     text = page.text
-    try:
-        text = remove_metadata(page.text)
-    except:
-        pass
+    text = remove_metadata(page.text)
     text = text.lower()
     # make all whitespace a single space character
     text = re.sub(r'\W',' ',text)
@@ -132,7 +164,7 @@ def create_doc_freq(indexer, folder='.'):
             tokens = set(tokenize_page(page))
             storage.update(tokens)
             if random.randint(0, 10000) == 42:
-                print('time left:', round(storage.time_left() / 60 / 60, 2), 'hours  ')
+                print('time left:', round(storage.time_left() / 60 / 60, 2), 'hours\t\t')
 
             q.task_done()
     print('creating queue with', num_worker_threads, 'threads')
@@ -148,7 +180,7 @@ def create_doc_freq(indexer, folder='.'):
         q.put(indexer.get_page_by_num(page_num))
         if i % 100 == 0:
             print(round(100*(i/len(page_numbers)),3),'% done with queueing', end='\r')
-    print('done queueing pages\t\t')
+    print('done queueing pages           ')
     q.join()
     print('telling threads to stop')
     for i in range(num_worker_threads):
@@ -156,10 +188,7 @@ def create_doc_freq(indexer, folder='.'):
     print('waiting')
     for t in threads:
         t.join()
-    fname = folder/'wikipedia_wordfreq.pkl'
-    with open(fname, 'wb') as f:
-        f.write(pickle.dumps(storage.dict))
-    print("saved docfreq file to ", fname)
+    return storage.dict
 
 def create_tfidf(indexer, folder='.'):
     folder = Path(folder)
@@ -192,7 +221,4 @@ def create_tfidf(indexer, folder='.'):
     for fname in os.listdir(folder):
         if 'tfidf_' in fname and '.csv' in fname:
             dfs.append(read_csv(folder/fname))
-    df = concat(dfs)
-    fname = folder/'tfidf.csv'
-    df.to_csv(fname)
-    print("wrote final CSV to", fname)
+    return concat(dfs)
