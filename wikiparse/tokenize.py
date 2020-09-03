@@ -160,7 +160,7 @@ def create_doc_freq(indexer, folder='.'):
             page = q.get()
             if page is None:
                 break
-            # we only care about whether a term is in a document, not how many times it appears there (for document frequency)
+            # for this, we only care about whether a term is in a document, not how many times it appears there
             tokens = set(tokenize_page(page))
             storage.update(tokens)
             if random.randint(0, 10000) == 42:

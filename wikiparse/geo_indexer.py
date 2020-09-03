@@ -98,6 +98,8 @@ class Indexer:
         start = time.time()
         pg = page_generator(open(self.xml_path, 'rb'), sample=sample)
         coords_count = 0
+        successes = 0
+        failures = 0
         for i,page in enumerate(pg):
             start_idx, end_idx, page = page
             if utils.tag_finder(page, ['Coord', 'coord']):
@@ -110,7 +112,7 @@ class Indexer:
                             (data_extract['title'], data_extract['coords'], int(i),
                              int(start_idx), int(end_idx))
                         )
-                    except sqlite3.IntegrityError:
+                    except sqlite3.IntegrityError: # has already been inserted
                         pass
                     coords_dict = utils.coord_string_to_dict(data_extract['coords'])
                     coords_dict['title'] = data_extract['title']
@@ -118,17 +120,17 @@ class Indexer:
                     qstring = f'''INSERT INTO coords
                         ({",".join(coords_dict.keys())}) VALUES
                         ({",".join(["?" for item in coords_dict.values()])})'''
-                    # print(qstring, coords_dict.values())
                     try:
                         self.cursor.execute(qstring, list(coords_dict.values()))
-                    except sqlite3.IntegrityError:
+                    except sqlite3.IntegrityError: # has already been inserted
                         pass
+                    successes += 1
                 else:
-                    pass
+                    failures += 1
                     # print(data_extract['title'], 'coord tag not found')
             if coords_count % 1_000 == 0:
                 self.db.commit()
-            print(i, end='\r')
+            print(f'index {utils.readable_int(i)}, successes {utils.readable_int(coords_count)}, failures {utils.readable_int(failures)}   ', end='\r')
         print(f"iterating {round(sample*100,2)}% of pages took {round((time.time()-start)/60,2)} minutes")
         print(round(100*coords_count/i,2), '% contained coordinates tag')
         self.metadata['size'] = coords_count
