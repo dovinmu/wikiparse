@@ -179,7 +179,11 @@ class Page:
         self.title = self.dom.find('title').text
 
     def coords(self):
-        return utils.page_to_geographic_db(self.xml)['coords']
+        try:
+            return utils.get_page_coords(self.xml)
+        except Exception as e:
+            print(e)
+            return [None, None]
         
     def __str__(self):
         return 'Page: ' + self.title
